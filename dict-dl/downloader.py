@@ -21,16 +21,22 @@
 
 from urllib.error import HTTPError
 import urllib.request
-import re
+import re, os
 
-def download_cambridge(word, pos="all"):
-    URL = "http://dictionary.cambridge.org/dictionary/english/" + word
-
+def download_cambridge(word, pos="all", folder=None):
     if pos not in ["all", "adjective", "noun", "verb"]:
         pos = "all"
 
     try:
-        html = urllib.request.urlopen(URL).read().decode('utf-8')
+        if folder:
+            filename = os.path.join(folder, 'cam', "cam_{}.html".format(word))
+            if os.path.exists(filename):
+                html = open(filename).read()
+            else:
+                return -1
+        else:
+            URL = "http://dictionary.cambridge.org/dictionary/english/" + word
+            html = urllib.request.urlopen(URL).read().decode('utf-8')
 
         # definitions are in a <b> tag that has the class "def"
         defs_pat = re.compile('<b class="def">(.*?)</b>', re.I|re.S)
@@ -87,18 +93,25 @@ def download_cambridge(word, pos="all"):
         print("       * retry Cambridge -", word)
         return -1
 
-def download_dictionary(word, pos="all"):
-    URL = "http://www.dictionary.com/browse/" + word
+def download_dictionary(word, pos="all", folder=None):
 
     if pos not in ["all", "adjective", "noun", "verb"]:
         pos = "all"
 
     try:
-        html = urllib.request.urlopen(URL).read().decode('utf-8')
+        if folder:
+            filename = os.path.join(folder, 'dic', "dic_{}.html".format(word))
+            if os.path.exists(filename):
+                html = open(filename).read()
+            else:
+                return -1
+        else:
+            URL = "http://www.dictionary.com/browse/" + word
+            html = urllib.request.urlopen(URL).read().decode('utf-8')
 
         # definitions are in <section> tags with class "css-171jvig". Each POS
         # type has its own <section>, so extract them all.
-        block_pat = re.compile('<section class="css-171jvig(.*?)</section>',
+        block_pat = re.compile('<section class="css-1f2po4u(.*)</section>',
                                re.I|re.S)
         blocks = re.findall(block_pat, html)
 
@@ -106,7 +119,7 @@ def download_dictionary(word, pos="all"):
         # "css-1e3ziqc". Sometimes there is another class, so use the un-greedy
         # regex pattern .+? to go until the closing '>' of the opening <span>
         # tag.
-        defs_pat = re.compile('<span class=".+?css-1e3ziqc.+?>(.*?)</span>', re.I|re.S)
+        defs_pat = re.compile('<span class=".+?css-98tqe9.+?>(.*?)</span>', re.I|re.S)
 
         # need to extract definitions only if it's a certain pos type
         if pos in ["adjective", "noun", "verb"]:
@@ -162,28 +175,32 @@ def download_dictionary(word, pos="all"):
         print("       * retry dictionary.com -", word)
         return -1
 
-def download_collins(word, pos="all"):
-    URL = "https://www.collinsdictionary.com/dictionary/english/" + word
-
-    # Collins has set some server restrictions. Need to spoof the HTTP headers
-    headers = {
-        'User-Agent':
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like '
-            'Gecko) Chrome/23.0.1271.64 Safari/537.11',
-        'Accept':
-            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Encoding':
-            'none',
-        'Accept-Language':
-            'en-US,en;q=0.8',
-        }
-    req = urllib.request.Request(URL, headers=headers)
-
+def download_collins(word, pos="all", folder=None):
     if pos not in ["all", "adjective", "noun", "verb"]:
         pos = "all"
-
     try:
-        html = urllib.request.urlopen(req).read().decode('utf-8')
+        if folder:
+            filename = os.path.join(folder, 'col', "col_{}.html".format(word))
+            if os.path.exists(filename):
+                html = open(filename).read()
+            else:
+                return -1
+        else:
+            URL = "https://www.collinsdictionary.com/dictionary/english/" + word
+            # Collins has set some server restrictions. Need to spoof the HTTP headers
+            headers = {
+                'User-Agent':
+                    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like '
+                    'Gecko) Chrome/23.0.1271.64 Safari/537.11',
+                'Accept':
+                    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Encoding':
+                    'none',
+                'Accept-Language':
+                    'en-US,en;q=0.8',
+                }
+            req = urllib.request.Request(URL, headers=headers)
+            html = urllib.request.urlopen(req).read().decode('utf-8')
 
         # definitions are in big blocks <div class="content definitions [...] >
         # Use the next <div> with "copyright" for ending regex. Regroup all
@@ -248,14 +265,19 @@ def download_collins(word, pos="all"):
         print("       * retry Collins -", word)
         return -1
 
-def download_oxford(word, pos="all"):
-    URL = "http://en.oxforddictionaries.com/definition/"+ word
-
+def download_oxford(word, pos="all", folder=None):
     if pos not in ["all", "adjective", "noun", "verb"]:
         pos = "all"
-
     try:
-        html = urllib.request.urlopen(URL).read().decode('utf-8')
+        if folder:
+            filename = os.path.join(folder, 'oxf', "oxf_{}.html".format(word))
+            if os.path.exists(filename):
+                html = open(filename).read()
+            else:
+                return -1
+        else:
+            URL = "http://en.oxforddictionaries.com/definition/"+ word
+            html = urllib.request.urlopen(URL).read().decode('utf-8')
 
         # extract blocks containing POS type and definitions. For example, if
         # word is both a noun and a verb, there is one <section class="gramb">
@@ -314,7 +336,7 @@ with open('stopwords.txt') as f:
     for line in f:
         STOPSWORD.add(line.strip().lower())
 
-def download_word_definition(dict_name, word, pos="all", clean=True):
+def download_word_definition(dict_name, word, pos="all", folder=None, clean=True):
     """
     Download the definition(s) for word from the dictionary dict_name. If clean
     is True, clean the definition before returning it (remove stopwords and non
@@ -322,7 +344,7 @@ def download_word_definition(dict_name, word, pos="all", clean=True):
     """
     words    = []
     download = MAP_DICT[dict_name]
-    res      = download(word, pos=pos)
+    res      = download(word, pos=pos, folder=folder)
     if res == -1: # no definition fetched
         res = []
 
@@ -335,7 +357,7 @@ def download_word_definition(dict_name, word, pos="all", clean=True):
         for word in definition.split():
             word = ''.join([c.lower() for c in word
                          if c.isalpha() and ord(c) < 128])
-            if not word in STOPSWORD:
+            if word and not word in STOPSWORD:
                 words.append(word)
 
     return words

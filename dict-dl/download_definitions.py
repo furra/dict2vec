@@ -23,7 +23,7 @@ from queue import Queue
 from threading import Thread, Lock
 from multiprocessing import cpu_count
 from downloader import *
-from os.path import splitext, isfile
+from os.path import splitext, isfile, exists
 import argparse
 import time
 import sys
@@ -31,15 +31,18 @@ import sys
 # global variables used (and shared) by all ThreadDown instances
 exitFlag = 0
 counterLock = Lock()
-request_counter  = {"Cam": 0, "Dic": 0, "Col": 0, "Oxf": 0}
-download_counter = {"Cam": 0, "Dic": 0, "Col": 0, "Oxf": 0}
+# request_counter  = {"Cam": 0, "Dic": 0, "Col": 0, "Oxf": 0}
+request_counter  = {}
+# download_counter = {"Cam": 0, "Dic": 0, "Col": 0, "Oxf": 0}
+download_counter = {}
 
 class ThreadDown(Thread):
     """Class representing a thread that download definitions."""
-    def __init__(self, dict_name, pos, data_queue, res_queue):
+    def __init__(self, dict_name, pos, folder, data_queue, res_queue):
         Thread.__init__(self)
         self.dict_name  = dict_name
         self.pos        = pos # part of speech (noun, verb, adjective or all)
+        self.folder     = folder if folder and exists(folder) else False # read from disk
         self.data_queue = data_queue
         self.res_queue  = res_queue
 
@@ -48,9 +51,10 @@ class ThreadDown(Thread):
             if not self.data_queue.empty():
                 word = self.data_queue.get()
                 result = download_word_definition(self.dict_name, word,
-                                                  self.pos)
+                                                  self.pos, folder=self.folder)
                 counterLock.acquire()
-                request_counter[self.dict_name] += 1
+                if self.dict_name in request_counter:
+                    request_counter[self.dict_name] += 1
                 counterLock.release()
 
                 if len(result) > 0:
@@ -70,7 +74,7 @@ class ThreadWrite(Thread):
     def __init__(self, filename, msg_queue):
         Thread.__init__(self)
         self.msg_queue = msg_queue
-        self.of = open(filename, "a")
+        self.of = open(filename, "w")
 
     def run(self):
         while not exitFlag:
@@ -87,7 +91,7 @@ class ThreadWrite(Thread):
 
         self.of.close()
 
-def main(filename, pos="all"):
+def main(filename, pos="all", dictionary='all', folder=None):
     # 0. to measure download time; use `global` to be able to modify exitFlag
     globalStart = time.time()
     global exitFlag
@@ -111,8 +115,25 @@ def main(filename, pos="all"):
 
     # look if some definitions have already been downloaded. If that's the case,
     # add the words present in output_fn in the aleady_done variable
-    already_done = {"Cam": set(), "Dic": set(), "Col": set(), "Oxf": set()}
+    already_done = {}
+    if dictionary == 'all' or dictionary == 'cam':
+        already_done['Cam'] = set()
+        request_counter['Cam'] = 0
+        download_counter['Cam'] = 0
+    if dictionary == 'all' or dictionary == 'dic':
+        already_done['Dic'] = set()
+        request_counter['Dic'] = 0
+        download_counter['Dic'] = 0
+    if dictionary == 'all' or dictionary == 'col':
+        already_done['Col'] = set()
+        request_counter['Col'] = 0
+        download_counter['Col'] = 0
+    if dictionary == 'all' or dictionary == 'oxf':
+        already_done['Oxf'] = set()
+        request_counter['Oxf'] = 0
+        download_counter['Oxf'] = 0
     reusing = False
+
     if isfile(output_fn): # need to read the file, first test if it exists
         with open(output_fn) as f:
             for line in f:
@@ -141,13 +162,13 @@ def main(filename, pos="all"):
 
     # only add words in queue if they are not already done
     for w in vocabulary:
-        if not w in already_done["Cam"]:
+        if (dictionary == 'all' or dictionary == 'cam') and w not in already_done["Cam"]:
             queue_Cam.put(w)
-        if not w in already_done["Dic"]:
+        if (dictionary == 'all' or dictionary == 'dic') and w not in already_done["Dic"]:
             queue_Dic.put(w)
-        if not w in already_done["Col"]:
+        if (dictionary == 'all' or dictionary == 'col') and w not in already_done["Col"]:
             queue_Col.put(w)
-        if not w in already_done["Oxf"]:
+        if (dictionary == 'all' or dictionary == 'oxf') and w not in already_done["Oxf"]:
             queue_Oxf.put(w)
 
     # 3. create threads
@@ -164,19 +185,25 @@ def main(filename, pos="all"):
 
     # start all the download threads
     for x in range(NB_THREAD):
-        thread_Cam = ThreadDown("Cam", pos, queue_Cam, queue_msg)
-        thread_Cam.start()
-        thread_Dic = ThreadDown("Dic", pos, queue_Dic, queue_msg)
-        thread_Dic.start()
-        thread_Col = ThreadDown("Col", pos, queue_Col, queue_msg)
-        thread_Col.start()
-        thread_Oxf = ThreadDown("Oxf", pos, queue_Oxf, queue_msg)
-        thread_Oxf.start()
+        if dictionary == 'all' or dictionary == 'cam':
+            thread_Cam = ThreadDown("Cam", pos, folder, queue_Cam, queue_msg)
+            thread_Cam.start()
+            threads.append(thread_Cam)
 
-        threads.append(thread_Cam)
-        threads.append(thread_Dic)
-        threads.append(thread_Col)
-        threads.append(thread_Oxf)
+        if dictionary == 'all' or dictionary == 'dic':
+            thread_Dic = ThreadDown("Dic", pos, folder, queue_Dic, queue_msg)
+            thread_Dic.start()
+            threads.append(thread_Dic)
+
+        if dictionary == 'all' or dictionary == 'col':
+            thread_Col = ThreadDown("Col", pos, folder, queue_Col, queue_msg)
+            thread_Col.start()
+            threads.append(thread_Col)
+
+        if dictionary == 'all' or dictionary == 'oxf':
+            thread_Oxf = ThreadDown("Oxf", pos, folder, queue_Oxf, queue_msg)
+            thread_Oxf.start()
+            threads.append(thread_Oxf)
 
     # 4. wait until all queues are empty, show progress, terminate all threads
     percent = 0
@@ -189,7 +216,7 @@ def main(filename, pos="all"):
         # the expected number of fetched words is the number of words
         # in the vocabulary times 4 because we are using 4 dictionaries.
         # The number of fetched words is simply the sum of each counter.
-        tmp = sum(request_counter.values()) / (4.0 * vocabulary_size) * 100
+        tmp = sum(request_counter.values()) / (len(request_counter) * vocabulary_size) * 100
         tmp = int(tmp) + 1
         if tmp != percent:
             print('\r{0}%'.format(tmp), end="")
@@ -229,6 +256,10 @@ if __name__ == '__main__':
         Of Speech) is given, the script will only download the definitions that
         corresponds to that POS, not the other ones. By default, it downloads
         the definitions for all POS""", type=str.lower, default="all")
+    parser.add_argument("-d", "--dictionary", metavar="dictionary", nargs="?", default='all',
+                        choices=['all', 'cam', 'col', 'dic', 'oxf'], const='all',
+                        help="Name of the dictionary to download definitions from")
+    parser.add_argument("-f", "--folder", metavar="folder", help="Reading from folder instead of downloading")
     args = parser.parse_args()
 
     if args.pos not in ["noun", "verb", "adjective", "all"]:
@@ -236,4 +267,4 @@ if __name__ == '__main__':
         print("It can be NOUN, VERB or ADJECTIVE. Using default POS (ALL)\n")
         args.pos = "all"
 
-    main(args.list_words, pos=args.pos)
+    main(args.list_words, pos=args.pos, dictionary=args.dictionary, folder=args.folder)

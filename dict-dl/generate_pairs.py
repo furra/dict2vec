@@ -47,10 +47,8 @@ def loadEmbedding(filename, list_words):
     nb_word = 0
     with open(filename) as f:
         first_line = f.readline().split()
-        word, nb_dims = first_line[0], len(first_line[1:])
-
-        if word in list_words:
-            nb_word += 1
+        # first line is: total number of words - number of dimensions
+        words, nb_dims = first_line[0], int(first_line[1])
 
         # for each line, add 1 to nb_word if word is in list_words
         for line in f:
