@@ -51,10 +51,19 @@ struct entry
 	int pos_wp;     /* current cursor position in wp[] */
 	int *wp;
 
-
 	long  count;    /* number of occurrences of entry in input file */
 	char  *word;    /* string associated to the entry */
 	float pdiscard; /* probability to discard entry when found in input */
+
+	int num_subwords;
+	char **subwords; /* subwords (used for writing vec file) */
+	int *subwords_indices; /* weight indices of subwords */
+};
+
+struct sw_entry
+{
+	char *ngram; //to check the hash
+	int index; //index of weights
 };
 
 struct parameters
@@ -72,6 +81,11 @@ struct parameters
 	int epoch;
 	int save_each_epoch;
 
+	int num_ngrams;
+	_Bool dict;
+	_Bool subwords;
+	_Bool fasttext;
+
 	float alpha;
 	float starting_alpha;
 	float sample;
@@ -81,20 +95,25 @@ struct parameters
 
 /* dynamic array containing 1 entry for each word in vocabulary */
 struct entry *vocab;
+struct sw_entry *subwords;
 
 struct parameters args = {
 	"", "",
 	100, 5, 5, 5, 0, 0, 1, 1, 0,
+	3, 1, 0, 0,
 	0.025, 0.025, 1e-4, 1.0, 0.25
 };
 
 /* variables required for processing input file */
-long vocab_max_size = 10000, vocab_size = 0, train_words = 0, file_size = 0,
+//train_words = read_words
+long vocab_max_size = 10000, subwords_size = 0, vocab_size = 0, train_words = 0, file_size = 0,
 	word_count_actual = 0;
-
+long sw_vocab_max_size = 10000;
 
 int *vocab_hash;   /* hash table to know index of a word */
+int *subwords_hash; /* hash table to know index of a subword */
 float *WI, *WO;    /* weight matrices */
+float *SWI;  /* weight matrices for subwords */
 int *table;        /* array of indexes for negative sampling */
 
 static float sigmoid(const float x)
@@ -169,6 +188,10 @@ static float sigmoid(const float x)
 	static int index;
 
 	index = ((x / MAX_SIGMOID) + 1) / 2 * SIGMOID_SIZE;
+	if(index < 0){
+		printf("x: %f\n", x);
+		printf("index %d\n", index);
+	}
 	return values[index];
 }
 
@@ -276,6 +299,17 @@ unsigned int hash(char *s)
 	return hashval % HASHSIZE;
 }
 
+/* find: return the position of ngram sw in subwords_hash. Analogous to find()
+ */
+unsigned int find_subword(char *sw)
+{
+	unsigned int h = hash(sw);
+
+	while (subwords_hash[h] != -1 && strcmp(sw, subwords[subwords_hash[h]].ngram))
+		h = (h + 1) % HASHSIZE;
+	return h;
+}
+
 /* find: return the position of string s in vocab_hash. If word has never been
  * met, the cell at index hash(word) in vocab_hash will be -1. If the cell is
  * not -1, we start to compare word to each element with the same hash.
@@ -287,6 +321,106 @@ unsigned int find(char *s)
 	while (vocab_hash[h] != -1 && strcmp(s, vocab[vocab_hash[h]].word))
 		h = (h + 1) % HASHSIZE;
 	return h;
+}
+/* add_ngram: read a subword and add it to the ngram vocab if it's a new ngram.
+ * Returns the index of the ngram.
+ */
+int add_ngram(char* ngram)
+{
+	unsigned int h = find_subword(ngram);
+
+	if (subwords_hash[h] == -1)
+	{
+		struct sw_entry swe;
+
+		swe.ngram = malloc(sizeof(char) * (strlen(ngram)+1));
+		strcpy(swe.ngram, ngram);
+		swe.index = subwords_size;
+
+		subwords[subwords_size] = swe;
+		subwords_hash[h] = subwords_size++;
+
+		/* reallocate more space if needed */
+		if (subwords_size >= sw_vocab_max_size)
+		{
+			printf("%ld reallocation\n", sw_vocab_max_size);
+			sw_vocab_max_size += 10000;
+			subwords = realloc(subwords, sw_vocab_max_size * sizeof(struct sw_entry));
+		}
+
+	}
+
+	return subwords[subwords_hash[h]].index;
+}
+
+/* get_subwords: read a word and return an array of its subword ngrams
+ * n is the number of ngrams
+ */
+char** get_subwords(char *word, int word_length, int n){
+	int start, end;
+	int num_ngrams, ngrams_counter;
+	char **ngrams;
+
+	//1-grams are a special case
+	if(n==1){
+		num_ngrams = word_length;
+		ngrams = (char **) malloc(sizeof(char*) * (num_ngrams));
+		if(word_length == 1){
+			char* sw = (char*) malloc(sizeof(char)*4);
+			sw[0] = '<';
+			sw[1] = word[0];
+			sw[2] = '>';
+			sw[3] = '\0';
+			ngrams[0] = sw;
+		}
+		else{
+			start = 1;
+			end = word_length-2;
+			ngrams_counter = 1;
+
+			char* sw = (char*) malloc(sizeof(char)*3);
+			sw[0] = '<';
+			sw[1] = word[0];
+			sw[2] = '\0';
+			ngrams[0] = sw;
+
+			for(int i = start; i <= end; i++){
+				sw = (char*) malloc(sizeof(char)*2);
+				sw[0] = word[i];
+				sw[1] = '\0';
+				ngrams[ngrams_counter++] = sw;
+			}
+
+			sw = (char*) malloc(sizeof(char)*3);
+			sw[0] = word[end+1];
+			sw[1] = '>';
+			sw[2] = '\0';
+			ngrams[end+1] = sw;
+		}
+	}
+	else{
+		num_ngrams = word_length+3-n, ngrams_counter=0;
+		ngrams = (char **) malloc(sizeof(char*) * (num_ngrams+1));
+		start = -1;
+		end = word_length+1-n;
+		if(end < -1)
+			return ngrams;
+		for(int i = start; i <= end; i++){
+			char* sw = (char*) malloc(sizeof(char) * (n+1));
+			for(int j = 0; j < n; j++){
+				if(i+j < 0)
+					sw[j] = '<';
+				else
+					if(i+j == word_length)
+						sw[j] = '>';
+					else
+						sw[j] = word[i+j];
+			}
+			sw[n] = '\0';
+			ngrams[ngrams_counter++] = sw;
+		}
+	}
+	return ngrams;
 }
 
 /* add word to the vocabulary. If word already exists, increment its count */
@@ -318,6 +452,7 @@ void add_word(char *word)
 			vocab_max_size += 10000;
 			vocab = realloc(vocab, vocab_max_size * sizeof(struct entry));
 		}
+
 	}
 	else
 	{
@@ -338,9 +473,15 @@ void destroy_vocab()
 {
 	int i;
 
+	printf("Destroying vocab\n");
 	for (i = 0; i < vocab_size; ++i)
 	{
 		free(vocab[i].word);
+		for (int j = 0; j < vocab[i].num_subwords; ++j){
+			free(vocab[i].subwords[j]);
+		}
+		free(vocab[i].subwords);
+		free(vocab[i].subwords_indices);
 
 		if (vocab[i].sp != NULL)
 			free(vocab[i].sp);
@@ -405,7 +546,7 @@ int read_strong_pairs(char *filename)
 	if ((fi = fopen(filename, "r")) == NULL)
 	{
 		printf("WARNING: strong pairs data not found!\n"
-		       "Not taken into account during learning.\n");
+			   "Not taken into account during learning.\n");
 		return 1;
 	}
 
@@ -465,7 +606,7 @@ int read_weak_pairs(char *filename)
 	if ((fi = fopen(filename, "r")) == NULL)
 	{
 		printf("WARNING: weak pairs data not found!\n"
-		       "Not taken into account during learning.\n");
+			   "Not taken to account during learning.\n");
 		return 1;
 	}
 
@@ -513,6 +654,27 @@ int read_weak_pairs(char *filename)
 	return 0;
 }
 
+void add_subwords_vocab(){
+	for (int i = 0; i < vocab_size; ++i)
+	{
+		int word_length = strlen(vocab[i].word);
+		vocab[i].num_subwords = args.num_ngrams == 1 ? word_length : word_length+3-args.num_ngrams;
+		if(vocab[i].num_subwords < 2){
+			vocab[i].num_subwords = 0;
+			continue;
+		}
+
+		//we need the subwords to write the vec file
+		vocab[i].subwords = get_subwords(vocab[i].word, word_length, args.num_ngrams);
+		// for each subword get index and add it to the array (subwords_indices)
+		vocab[i].subwords_indices = malloc(sizeof(int)*vocab[i].num_subwords);
+		for (int j = 0; j < vocab[i].num_subwords; ++j){
+			vocab[i].subwords_indices[j] = add_ngram(vocab[i].subwords[j]);
+		}
+	}
+	subwords = realloc(subwords, subwords_size * sizeof(struct sw_entry));
+}
+
 /* read_vocab: read the file given as -input. For each word, either add it in
  * the vocab or increment its occurrence. Also read the strong and weak pairs
  * files if provided. Sort the vocabulary by occurrences and display some infos.
@@ -530,8 +692,10 @@ void read_vocab(char *input_fn, char *strong_fn, char *weak_fn)
 	}
 
 	/* init the hash table with -1 */
-	for (i = 0; i < HASHSIZE; ++i)
+	for (i = 0; i < HASHSIZE; ++i){
 		vocab_hash[i] = -1;
+		subwords_hash[i] = -1;
+	}
 
 	/* some words are longer than MAXLEN, need to indicate a maximum width
 	 * to scanf so no buffer overflow. */
@@ -544,6 +708,10 @@ void read_vocab(char *input_fn, char *strong_fn, char *weak_fn)
 			printf("%ldK%c", train_words / 1000, 13);
 			fflush(stdout);
 		}
+
+		if(args.subwords && !args.fasttext)
+			// skip the word if its longer than the length of subword ngrams
+			if((unsigned int) args.num_ngrams > (strlen(word)+2)) continue;
 
 		/* add word we just read or increment its count if needed */
 		add_word(word);
@@ -559,14 +727,25 @@ void read_vocab(char *input_fn, char *strong_fn, char *weak_fn)
 	sort_and_reduce_vocab(HASHSIZE);
 
 	printf("Vocab size: %ld\n", vocab_size);
+
+	if(args.subwords){
+		printf("Using algorithm with subwords. Calculating ngrams...\n");
+		add_subwords_vocab();
+		printf("Done.\n");
+		printf("subwords size: %ld\n", subwords_size);
+	}
+
 	printf("Words in train file: %ld\n", train_words);
 
-	printf("Adding strong pairs...");
-	failure_strong = read_strong_pairs(strong_fn);
-	printf("\nAdding weak pairs...");
-	failure_weak = read_weak_pairs(weak_fn);
-	if (!failure_strong || !failure_weak)
-		printf("\nAdding pairs done.\n");
+	if(args.dict){
+		printf("Using algorithm with dictionary information.\n");
+		printf("Adding strong pairs...");
+		failure_strong = read_strong_pairs(strong_fn);
+		printf("\nAdding weak pairs...");
+		failure_weak = read_weak_pairs(weak_fn);
+		if (!failure_strong || !failure_weak)
+			printf("\nAdding pairs done.\n");
+	}
 
 	/* compute the discard probability for each word (only if we
 	 * subsample)*/
@@ -585,27 +764,47 @@ void init_network()
 	float r, l;
 	int i, j;
 
-	if ((WI = malloc(sizeof *WI * vocab_size * args.dim)) == NULL)
-	{
-		printf("Memory allocation failed for WI\n");
-		exit(1);
-	}
+	r = 1.0 / RAND_MAX;
+	l = 1.0 / args.dim;
 
-
+	printf("Initiating words' weights...\n");
 	if ((WO = calloc(vocab_size * args.dim, sizeof *WO)) == NULL)
 	{
 		printf("Memory allocation failed for WO\n");
 		exit(1);
 	}
 
-	/* WI is initialized with random values from (-0.5 / vec_dimension)
-	 * and (0.5 / vec_dimension). Multiply is faster than divide so
-	 * precompute 1 / RAND_MAX and 1 / dim. */
-	r = 1.0 / RAND_MAX;
-	l = 1.0 / args.dim;
-	for (i = 0; i < vocab_size; ++i)
-		for (j = 0; j < args.dim; ++j)
-			WI[i * args.dim + j] = ( (rand() * r) - 0.5 ) * l;
+	if ( args.fasttext || !args.subwords )
+	{
+		if ((WI = malloc(sizeof *WI * vocab_size * args.dim)) == NULL)
+		{
+			printf("Memory allocation failed for WI\n");
+			exit(1);
+		}
+
+		/* WI is initialized with random values from (-0.5 / vec_dimension)
+		 * and (0.5 / vec_dimension). Multiply is faster than divide so
+		 * precompute 1 / RAND_MAX and 1 / dim. */
+		for (i = 0; i < vocab_size; ++i)
+			for (j = 0; j < args.dim; ++j)
+				WI[i * args.dim + j] = ( (rand() * r) - 0.5 ) * l;
+
+	}
+
+	if ( args.subwords )
+	{
+		printf("Initiating subwords' weights...\n");
+		if ((SWI = malloc(sizeof(*SWI) * subwords_size * args.dim)) == NULL)
+		{
+			printf("Memory allocation failed for SWI\n");
+			exit(1);
+		}
+		printf("malloc. Subwords size: %ld\ndims: %d\n", subwords_size, args.dim);
+
+		for (i = 0; i < subwords_size; ++i)
+			for (j = 0; j < args.dim; ++j)
+				SWI[i * args.dim + j] = ( (rand() * r) - 0.5 ) * l;
+	}
 }
 
 /* destroy_network: free the memory allocated for matrices WI and WO */
@@ -616,6 +815,35 @@ void destroy_network()
 
 	if (WO != NULL)
 		free(WO);
+
+	if (SWI != NULL)
+		free(SWI);
+
+}
+
+void write_vocab(char *filename){
+	FILE* fp = fopen(filename, "w");
+	for (int i = 0; i < vocab_size; ++i)
+	{
+		struct entry term = vocab[i];
+		fprintf(fp, "%s:\n", term.word);
+		for (int i = 0; i < term.num_subwords; ++i)
+		{
+			fprintf(fp, "%s\t%d\n", term.subwords[i], term.subwords_indices[i]);
+		}
+		fprintf(fp, "================\n");
+	}
+	fclose(fp);
+}
+
+void write_swvocab(char *filename){
+	FILE* fp = fopen(filename, "w");
+	for (int i = 0; i < subwords_size; ++i)
+	{
+		struct sw_entry term = subwords[i];
+		fprintf(fp, "ngram: %s\tindex: %d\n", term.ngram, term.index);
+	}
+	fclose(fp);
 }
 
 void *train_thread(void *id)
@@ -627,6 +855,10 @@ void *train_thread(void *id)
 	long word_count_local, negsamp_discarded, negsamp_total;
 	float label, dot_prod, grad, *hidden;
 	double progress, wts, discarded, cps, d_train, lr_coef;
+
+	//subwords
+	float ns_factor, *cw_emb;
+	int subindex, num_words, swi;
 
 	clock_t now;
 	int rnd = (intptr_t) id;
@@ -647,8 +879,13 @@ void *train_thread(void *id)
 	d_train          = 1.0f / train_words;
 	lr_coef          = args.starting_alpha / ((double) (args.epoch * train_words));
 
+	//TODO: warning
+	if(args.subwords)
+		cw_emb = calloc(args.dim, sizeof(*cw_emb));
+
 	while (word_count_actual < (train_words * (current_epoch + 1)))
 	{
+
 		/* update learning rate and print progress */
 		if (word_count_local > 20000)
 		{
@@ -665,8 +902,8 @@ void *train_thread(void *id)
 			wts = word_count_actual / ((double)(now - start) * cps);
 			discarded = negsamp_discarded * 100.0 / negsamp_total;
 			printf("%clr: %f  Progress: %.2f%%  Words/thread/sec:"
-			       " %.2fk  Discarded: %.2f%% ",
-			       13, args.alpha, progress, wts, discarded);
+				   " %.2fk  Discarded: %.2f%% ",
+				   13, args.alpha, progress, wts, discarded);
 			fflush(stdout);
 		}
 
@@ -681,6 +918,7 @@ void *train_thread(void *id)
 			 * maximum width to scanf so no buffer overflow. */
 			fscanf(fi, "%100s", word);
 			w_t = vocab_hash[find(word)];
+			// printf("%d\t%s\n", w_t, word);
 
 			/* word is not in vocabulary, move to next one */
 			if (w_t == -1)
@@ -732,29 +970,59 @@ void *train_thread(void *id)
 							target = table[neg_pos++];
 							if (neg_pos > table_size-1)
 								neg_pos = 0;
-						} while (target == w_t);
+						} while (target == w_t); //picks different word than target word
 
 						/* if random word form a strong a weak pair
 						 with w_c, move to next one */
-						if (contains(vocab[w_c].sp, target,
-						             vocab[w_c].n_sp) ||
-						    contains(vocab[w_c].wp, target,
-						             vocab[w_c].n_wp))
-						{
-							++negsamp_discarded;
-							continue;
+						if(args.dict){
+							if (contains(vocab[w_c].sp, target,
+										 vocab[w_c].n_sp) ||
+								contains(vocab[w_c].wp, target,
+										 vocab[w_c].n_wp))
+							{
+								++negsamp_discarded;
+								continue;
+							}
 						}
 
 						++negsamp_total;
 						label = 0.0;
 					}
 
-
 					/* forward propagation */
 					index2 = target * args.dim;
-					dot_prod = 0.0;
-					for (k = 0; k < args.dim; ++k)
-						dot_prod += WI[index1 + k] * WO[index2 + k];
+					if(!args.subwords){
+						dot_prod = 0.0;
+						for (k = 0; k < args.dim; ++k)
+							dot_prod += WI[index1 + k] * WO[index2 + k];
+					}
+					else{
+						memset(cw_emb, 0.0, args.dim * sizeof(*cw_emb));
+
+						num_words = vocab[w_c].num_subwords;
+						for (swi = 0; swi < num_words; ++swi){
+							subindex = vocab[w_c].subwords_indices[swi]*args.dim;
+							for (k = 0; k < args.dim; ++k){
+								cw_emb[k] += SWI[subindex + k];
+							}
+						}
+
+						if(args.fasttext){
+							for (k = 0; k < args.dim; ++k)
+								cw_emb[k] += WI[index1 + k];
+							num_words++;
+						}
+
+						ns_factor = 1.0;
+						if(num_words > 1) ns_factor = 1/(float)num_words;
+
+						for (k = 0; k < args.dim; ++k)
+							cw_emb[k] *= ns_factor;
+
+						dot_prod = 0.0;
+						for (k = 0; k < args.dim; ++k)
+							dot_prod += cw_emb[k] * WO[index2 + k];
+					}
 
 					if (dot_prod > MAX_SIGMOID)
 						grad = args.alpha * (label - 1.0);
@@ -770,79 +1038,118 @@ void *train_thread(void *id)
 					 the 2 operations is slower. */
 					for (k = 0; k < args.dim; ++k)
 						hidden[k] += grad * WO[index2 + k];
-					for (k = 0; k < args.dim; ++k)
-						WO[index2 + k] += grad * WI[index1 + k];
+					if(args.subwords)
+						for (k = 0; k < args.dim; ++k)
+							WO[index2 + k] += grad * cw_emb[k];
+					else{
+						for (k = 0; k < args.dim; ++k)
+							WO[index2 + k] += grad * WI[index1 + k];
+					}
 				}
 
-				/* POSITIVE SAMPLING UPDATE (strong pairs) */
-				for (d = args.strong_draws; d--;)
-				{
-					/* can't do anything if no strong pairs
-					 */
-					if (vocab[w_c].n_sp == 0)
-						break;
+				if(args.dict){
+					// /* POSITIVE SAMPLING UPDATE (strong pairs) */
+					for (d = args.strong_draws; d--;)
+					{
+						/* can't do anything if no strong pairs
+						 */
+						if (vocab[w_c].n_sp == 0)
+							break;
 
-					if (vocab[w_c].pos_sp > vocab[w_c].n_sp - 1)
-						vocab[w_c].pos_sp = 0;
-					target = vocab[w_c].sp[vocab[w_c].pos_sp++];
+						if (vocab[w_c].pos_sp > vocab[w_c].n_sp - 1)
+							vocab[w_c].pos_sp = 0;
+						target = vocab[w_c].sp[vocab[w_c].pos_sp++];
 
-					index2 = target * args.dim;
-					dot_prod = 0;
-					for (k = 0; k < args.dim; ++k)
-						dot_prod += WI[index1 + k] * WO[index2 + k];
+						index2 = target * args.dim;
+						dot_prod = 0;
 
-					/* dot product is already high, nothing to do */
-					if (dot_prod > MAX_SIGMOID)
-						continue;
-					else if (dot_prod < -MAX_SIGMOID)
-						grad = args.alpha * args.beta_strong;
-					else
-						grad = args.alpha * args.beta_strong *
-						    (1 - sigmoid(dot_prod));
+						if (args.subwords)
+							for (k = 0; k < args.dim; ++k)
+								dot_prod += cw_emb[k] * WO[index2 + k];
+						else
+							for (k = 0; k < args.dim; ++k)
+								dot_prod += WI[index1 + k] * WO[index2 + k];
 
+						/* dot product is already high, nothing to do */
+						if (dot_prod > MAX_SIGMOID)
+							continue;
+						else if (dot_prod < -MAX_SIGMOID)
+							grad = args.alpha * args.beta_strong;
+						else
+							grad = args.alpha * args.beta_strong *
+								(1 - sigmoid(dot_prod));
 
-					for (k = 0; k < args.dim; ++k)
-						hidden[k] += grad * WO[index2 + k];
-					for (k = 0; k < args.dim; ++k)
-						WO[index2 + k] += grad * WI[index1 + k];
-				}
+						for (k = 0; k < args.dim; ++k)
+							hidden[k] += grad * WO[index2 + k];
 
-				/* POSITIVE SAMPLING UPDATE (weak pairs) */
-				for (d = args.weak_draws; d--;)
-				{
-					/* can't do anything if no weak pairs */
-					if (vocab[w_c].n_wp == 0)
-						break;
+						if(args.subwords)
+							for (k = 0; k < args.dim; ++k)
+								WO[index2 + k] += grad * cw_emb[k];
+						else{
+							for (k = 0; k < args.dim; ++k)
+								WO[index2 + k] += grad * WI[index1 + k];
+						}
+					}
 
-					if (vocab[w_c].pos_wp > vocab[w_c].n_wp - 1)
-						vocab[w_c].pos_wp = 0;
-					target = vocab[w_c].wp[vocab[w_c].pos_wp++];
+					/* POSITIVE SAMPLING UPDATE (weak pairs) */
+					for (d = args.weak_draws; d--;)
+					{
+						/* can't do anything if no weak pairs */
+						if (vocab[w_c].n_wp == 0)
+							break;
 
-					index2 = target * args.dim;
-					dot_prod = 0;
-					for (k = 0; k < args.dim; ++k)
-						dot_prod += WI[index1 + k] * WO[index2 + k];
+						if (vocab[w_c].pos_wp > vocab[w_c].n_wp - 1)
+							vocab[w_c].pos_wp = 0;
+						target = vocab[w_c].wp[vocab[w_c].pos_wp++];
 
-					if (dot_prod > MAX_SIGMOID)
-						continue;
-					else if (dot_prod < -MAX_SIGMOID)
-						grad = args.alpha * args.beta_weak;
-					else
-						grad = args.alpha * args.beta_weak *
-						    (1 - sigmoid(dot_prod));
+						index2 = target * args.dim;
+						dot_prod = 0;
 
-					for (k = 0; k < args.dim; ++k)
-						hidden[k] += grad * WO[index2 + k];
-					for (k = 0; k < args.dim; ++k)
-						WO[index2 + k] += grad * WI[index1 + k];
+						if (args.subwords)
+							for (k = 0; k < args.dim; ++k)
+								dot_prod += cw_emb[k] * WO[index2 + k];
+						else
+							for (k = 0; k < args.dim; ++k)
+								dot_prod += WI[index1 + k] * WO[index2 + k];
+
+						if (dot_prod > MAX_SIGMOID)
+							continue;
+						else if (dot_prod < -MAX_SIGMOID)
+							grad = args.alpha * args.beta_weak;
+						else
+							grad = args.alpha * args.beta_weak *
+								(1 - sigmoid(dot_prod));
+
+						for (k = 0; k < args.dim; ++k)
+							hidden[k] += grad * WO[index2 + k];
+
+						if(args.subwords)
+							for (k = 0; k < args.dim; ++k)
+								WO[index2 + k] += grad * cw_emb[k];
+						else{
+							for (k = 0; k < args.dim; ++k)
+								WO[index2 + k] += grad * WI[index1 + k];
+						}
+					}
 				}
 
 				/* Back-propagate hidden -> input */
-				for (k = 0; k < args.dim; ++k)
-					WI[index1 + k] += hidden[k];
+				if(args.fasttext || !args.subwords){
+					for (k = 0; k < args.dim; ++k)
+						WI[index1 + k] += hidden[k];
+				}
+
+				if(args.subwords){
+					// subwords backpropagation
+					for (swi = 0; swi < vocab[w_c].num_subwords; ++swi){
+						subindex = vocab[w_c].subwords_indices[swi]*args.dim;
+
+						for (k = 0; k < args.dim; ++k)
+							SWI[subindex + k] += hidden[k];
+					}
+				}
 
 			} /* end for each word in the context window */
-
 		}     /* end for each word in line */
 	}         /* end while() loop for reading file */
 
@@ -850,11 +1157,14 @@ void *train_thread(void *id)
 	print a proper 100% progress */
 	if (args.alpha < 0) args.alpha = 0;
 	printf("%clr: %f  Progress: %.2f%%  Words/thread/sec: %.2fk  Discarded:"
-	       " %.2f%% ", 13, args.alpha, 100.0, wts, discarded);
+		   " %.2f%% ", 13, args.alpha, 100.0, wts, discarded);
 	fflush(stdout);
 
 	fclose(fi);
 	free(hidden);
+
+	if(args.subwords) free(cw_emb);
+
 	pthread_exit(NULL);
 }
 
@@ -873,8 +1183,10 @@ void save_vectors(char *output, int epoch)
 		fo = fopen(strcat(copy, suffix), "w");
 	}
 
-	else
+	else{
 		fo = fopen(strcat(output, ".vec"), "w");
+		printf("Writing %s file...\n", output);
+	}
 
 	if (fo == NULL)
 	{
@@ -882,19 +1194,67 @@ void save_vectors(char *output, int epoch)
 		exit(1);
 	}
 
-	/* first line is number of vectors + dimension */
-	fprintf(fo, "%ld %d\n", vocab_size, args.dim);
+	if(!args.subwords){
+		/* first line is number of vectors + dimension */
+		fprintf(fo, "%ld %d\n", vocab_size, args.dim);
 
-	for (i = 0; i < vocab_size; i++)
-	{
-		fprintf(fo, "%s ", vocab[i].word);
+		for (i = 0; i < vocab_size; i++)
+		{
+			fprintf(fo, "%s ", vocab[i].word);
 
-		for (j = 0; j < args.dim; j++)
-			fprintf(fo, "%.3f ", WI[i * args.dim + j]);
+			for (j = 0; j < args.dim; j++)
+				fprintf(fo, "%.3f ", WI[i * args.dim + j]);
 
-		fprintf(fo, "\n");
+			fprintf(fo, "\n");
+		}
 	}
+	else{
+		printf("Saving subwords embeddings...\n");
+		long total_size = subwords_size;
 
+		if(args.fasttext) total_size += vocab_size;
+
+		fprintf(fo, "%ld %d\n", total_size, args.dim);
+
+		for (i = 0; i < subwords_size; i++) {
+			int subindex = subwords[i].index;
+			fprintf(fo, "sw_%s ", subwords[i].ngram);
+
+			for (j = 0; j < args.dim; j++)
+				fprintf(fo, "%.3f ", SWI[subindex * args.dim + j]);
+
+			fprintf(fo, "\n");
+		}
+
+		if(args.fasttext){
+			printf("Adding fastText word embeddings...\n");
+			float *emb = calloc(args.dim, sizeof(*emb)), factor=1.0;
+			int subindex, swi;
+			for (i = 0; i < vocab_size; i++)
+			{
+				fprintf(fo, "%s ", vocab[i].word);
+				memset(emb, 0.0, args.dim * sizeof(*emb));
+
+				for (j = 0; j < args.dim; j++)
+					emb[j] = WI[i * args.dim + j];
+
+				for (swi = 0; swi < vocab[i].num_subwords; ++swi){
+					subindex = vocab[i].subwords_indices[swi]*args.dim;
+					for (j = 0; j < args.dim; ++j){
+						emb[j] += SWI[subindex + j];
+					}
+				}
+				factor = 1/(float)(vocab[i].num_subwords+1);
+
+				for (j = 0; j < args.dim; j++)
+					fprintf(fo, "%.3f ", emb[j]*factor);
+
+				fprintf(fo, "\n");
+			}
+			free(emb);
+			printf("Done.\n");
+		}
+	}
 	fclose(fo);
 }
 
@@ -981,6 +1341,7 @@ void print_help()
 void parse_args(int argc, char **argv, struct parameters *args,
 		char *spairs_file, char *wpairs_file)
 {
+
 	for (++argv, --argc; argc >= 2; ++argv, argc -= 2)
 	{
 		/* string arguments */
@@ -992,6 +1353,23 @@ void parse_args(int argc, char **argv, struct parameters *args,
 			strcpy(args->input, *++argv);
 		if (strcmp(*argv, "-output") == 0)
 			strcpy(args->output, *++argv);
+		if (strcmp(*argv, "-algorithm") == 0){
+			if(strcmp(*++argv, "w2v") == 0)
+				args->dict = 0;
+			else if(strcmp(*argv, "sw") == 0){
+				args->dict = 0;
+				args->subwords = 1;
+			}
+			else if(strcmp(*argv, "ft") == 0){
+				args->dict = 0;
+				args->subwords = 1;
+				args->fasttext = 1;
+			}
+			else if(strcmp(*argv, "dft") == 0){
+				args->subwords = 1;
+				args->fasttext = 1;
+			}
+		}
 
 		/* integer arguments */
 		if (strcmp(*argv, "-size") == 0)
@@ -1012,6 +1390,10 @@ void parse_args(int argc, char **argv, struct parameters *args,
 			args->epoch = atoi(*++argv);
 		if (strcmp(*argv, "-save-each-epoch") == 0)
 			args->save_each_epoch = atoi(*++argv);
+		/* for subwords and fasttext */
+		if (strcmp(*argv, "-ngrams") == 0){
+			args->num_ngrams = atoi(*++argv);
+		}
 
 		/* float arguments */
 		if (strcmp(*argv, "-alpha") == 0)
@@ -1049,12 +1431,16 @@ int main(int argc, char **argv)
 	/* initialise vocabulary table */
 	vocab = (struct entry *)calloc(vocab_max_size, sizeof(struct entry));
 	vocab_hash = (int *)calloc(HASHSIZE, sizeof(int));
-
-
+	/*vocab: array of struct entry
+	  vocab_hash: array of word to index?
+	*/
+	subwords = (struct sw_entry *)calloc(sw_vocab_max_size, sizeof(struct sw_entry));
+	subwords_hash = (int *)calloc(HASHSIZE, sizeof(int));
 
 	/*********** train ***/
 	/* variable for future use */
-
+	printf("Num threads: %d\n", args.num_threads);
+	printf("dict: %d, subwords: %d, fasttext: %d\n", args.dict, args.subwords, args.fasttext);
 	if ((threads = calloc(args.num_threads, sizeof *threads)) == NULL)
 	{
 		printf("Cannot allocate memory for threads\n");
@@ -1064,16 +1450,19 @@ int main(int argc, char **argv)
 	/* get words from input file */
 	printf("Starting training using file %s\n", args.input);
 	read_vocab(args.input, spairs_file, wpairs_file);
+	// write_vocab("vocab_subwords.txt");
 
 	/* instantiate the network */
 	init_network();
 
+	printf("Network initiated. Creating negative sampling table...\n");
 	/* instantiate negative table (for negative sampling) */
 	if (args.negative > 0)
 		init_negative_table();
 
 	/* train the model for multiple epoch */
 	start = clock();
+	printf("Threads: %d\n", args.num_threads);
 	for (current_epoch = 0; current_epoch < args.epoch; current_epoch++)
 	{
 		printf("\n-- Epoch %d/%d\n", current_epoch+1, args.epoch);
@@ -1090,11 +1479,13 @@ int main(int argc, char **argv)
 
 		if (args.save_each_epoch)
 		{
-			printf("\nSaving vectors for epoch %d.", current_epoch+1);
+			printf("\nSaving vectors for epoch %d.\n", current_epoch+1);
 			save_vectors(args.output, current_epoch+1);
 		}
 
 	}
+
+	printf("\nTrain finished.");
 
 	/* save the file only if we didn't save it earlier with the
 	 * save-each-epoch option */
@@ -1104,14 +1495,20 @@ int main(int argc, char **argv)
 		save_vectors(args.output, -1);
 	}
 
+	printf("\nFreeing memory...\n");
+	fflush(stdout);
 	free(table);
 	free(threads);
 	destroy_vocab();
 
 	/******** end train ****/
 
+	printf("\nVocab destroyed. Destroying network...\n");
 	destroy_network();
 	free(vocab_hash);
 
+	if(args.subwords) free(subwords_hash);
+
+	printf("\nDone.\n");
 	return 0;
 }
