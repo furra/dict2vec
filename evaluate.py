@@ -25,12 +25,26 @@ import math
 import argparse
 import numpy as np
 import scipy.stats as st
+import re
 
 FILE_DIR = "data/eval/"
 results      = dict()
 missed_pairs = dict()
 missed_words = dict()
 
+def getSubwords(word, n):
+    #n==1 is a special case
+    word = "<{}>".format(word)
+    subwords = []
+    if n > 1:
+        for i in range((len(word)-n)+1):
+            subwords.append(word[i:i+n])
+    elif n==1:
+        subwords.append(word[:2])
+        for i in range(2, len(word)-n-1):
+            subwords.append(word[i])
+        subwords.append(word[-2:])
+    return subwords
 
 def tanimotoSim(v1, v2):
     """Return the Tanimoto similarity between v1 and v2 (numpy arrays)"""
@@ -51,7 +65,7 @@ def init_results():
             results[filename] = []
 
 
-def evaluate(filename):
+def evaluate(filename, subwords=0, fasttext=0):
     """Compute Spearman rank coefficient for each evaluation file"""
 
     # step 0 : read the first line to get the number of words and the dimension
@@ -65,6 +79,8 @@ def evaluate(filename):
     mat = np.zeros((nb_line, nb_dims))
     wordToNum = {}
     count = 0
+    if subwords:
+        regex = re.compile(r'[^0-9a-z]')
 
     with open(filename) as f:
         f.readline() # skip first line because it does not contains a vector
@@ -90,28 +106,73 @@ def evaluate(filename):
                 w1, w2, val = w1.lower(), w2.lower(), float(val)
                 total_words += 2
                 total_pairs += 1
-                if not w1 in wordToNum:
-                    words_not_found += 1
-                if not w2 in wordToNum:
-                    words_not_found += 1
 
-                if not w1 in wordToNum or not w2 in wordToNum:
-                    pairs_not_found += 1
+                if not subwords:
+                    if not w1 in wordToNum:
+                        words_not_found += 1
+                    if not w2 in wordToNum:
+                        words_not_found += 1
+                    if not w1 in wordToNum or not w2 in wordToNum:
+                        pairs_not_found += 1
+                    else:
+                        v1, v2 = mat[wordToNum[w1]], mat[wordToNum[w2]]
+                        cosine = cosineSim(v1, v2)
+                        file_similarity.append(val)
+                        embedding_similarity.append(cosine)
+
+                        #tanimoto = tanimotoSim(v1, v2)
+                        #file_similarity.append(val)
+                        #embedding_similarity.append(tanimoto)
                 else:
-                    v1, v2 = mat[wordToNum[w1]], mat[wordToNum[w2]]
-                    cosine = cosineSim(v1, v2)
-                    file_similarity.append(val)
-                    embedding_similarity.append(cosine)
+                    #some words have dashes (-)
+                    #check if check for normalized word beforehand
+                    if not fasttext or (fasttext and w1 not in wordToNum):
+                        subwords_word1 = ['sw_{}'.format(sw) for sw in getSubwords(regex.sub('', w1), subwords)]
+                    else:
+                        subwords_word1 = [w1]
 
-                    #tanimoto = tanimotoSim(v1, v2)
-                    #file_similarity.append(val)
-                    #embedding_similarity.append(tanimoto)
+                    if not fasttext or (fasttext and w2 not in wordToNum):
+                        subwords_word2 = ['sw_{}'.format(sw) for sw in getSubwords(regex.sub('', w2), subwords)]
+                    else:
+                        subwords_word2 = [w2]
+
+                    nf = False
+                    v1 = np.zeros(mat[0].size)
+
+                    for word in subwords_word1:
+                        if word not in wordToNum:
+                            nf = True
+                            words_not_found += 1
+                            break
+                        v1 += mat[wordToNum[word]]
+                    if len(subwords_word1) == 0:
+                        continue
+                        import pdb; pdb.set_trace()
+                    v1 /= len(subwords_word1)
+
+                    v2 = np.zeros(mat[0].size)
+                    for word in subwords_word2:
+                        if word not in wordToNum:
+                            nf = True
+                            words_not_found += 1
+                            break
+                        v2 += mat[wordToNum[word]]
+                    if len(subwords_word2) == 0:
+                        continue
+                        import pdb; pdb.set_trace()
+                    v2 /= len(subwords_word2)
+
+                    if nf:
+                        pairs_not_found += 1
+                    else:
+                        cosine = cosineSim(v1, v2)
+                        file_similarity.append(val)
+                        embedding_similarity.append(cosine)
 
             rho, p_val = st.spearmanr(file_similarity, embedding_similarity)
             results[filename].append(rho)
             missed_pairs[filename] = (pairs_not_found, total_pairs)
             missed_words[filename] = (words_not_found, total_words)
-
 
 def stats():
     """Compute statistics on results"""
@@ -123,6 +184,8 @@ def stats():
 
     weighted_avg = 0
     total_found  = 0
+
+    prnt_str = ''
 
     for filename in sorted(results.keys()):
         average = sum(results[filename]) / float(len(results[filename]))
@@ -150,10 +213,11 @@ def stats():
               filename.ljust(16),
               average, minimum, maximum, std, missed_infos.center(20)))
 
+    prnt_str += 'Total found: {}'.format(total_found)
     print("-"*len(title))
     print("{0}| {1:.3f}".format("W.Average".ljust(16),
                                 weighted_avg / total_found))
-
+    print(prnt_str)
 
 if __name__ == '__main__':
 
@@ -163,10 +227,17 @@ if __name__ == '__main__':
 
     parser.add_argument('filenames', metavar='FILE', nargs='+',
                         help='Filename of word embedding to evaluate.')
+    parser.add_argument('-s', type=int, dest='subwords', default=0,
+                        help='Use subword embeddings.')
+    parser.add_argument('-f', type=int, dest='fasttext', default=0,
+                        help='Use fastText embeddings.')
 
     args = parser.parse_args()
 
+    if args.fasttext:
+        args.subwords = args.fasttext
+
     init_results()
     for f in args.filenames:
-        evaluate(f)
+        evaluate(f, args.subwords, args.fasttext)
     stats()

@@ -188,10 +188,6 @@ static float sigmoid(const float x)
 	static int index;
 
 	index = ((x / MAX_SIGMOID) + 1) / 2 * SIGMOID_SIZE;
-	if(index < 0){
-		printf("x: %f\n", x);
-		printf("index %d\n", index);
-	}
 	return values[index];
 }
 
