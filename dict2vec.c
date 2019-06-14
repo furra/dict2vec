@@ -875,7 +875,7 @@ void *train_thread(void *id)
 	d_train          = 1.0f / train_words;
 	lr_coef          = args.starting_alpha / ((double) (args.epoch * train_words));
 
-	//TODO: warning
+	cw_emb = malloc(sizeof(*cw_emb));
 	if(args.subwords)
 		cw_emb = calloc(args.dim, sizeof(*cw_emb));
 
