@@ -192,8 +192,6 @@ def processAnalogy(arguments):
 
     stats['cos_add'] = int(solution['ca'])
     stats['cos_mul'] = int(solution['cm'])
-    # print('one result {}'.format(datetime.now().strftime('%H:%M:%S')))
-    # print('one result')
     return stats
 
 def evaluateAnalogyPar(filename, args):
@@ -247,8 +245,6 @@ def evaluateAnalogy(filename, args):
     print(f"Solving analogies with k={args.k}")
     if args.search_sol:
         print("Looking for solution in topk results.")
-    # global results
-    # results = {'test.txt': []}
     for eval_file in results:
         #3CosAdd
         scores_ca = embedding.evaluate_word_analogies(os.path.join(FILE_DIR, eval_file),
@@ -259,10 +255,6 @@ def evaluateAnalogy(filename, args):
                                                       case_insensitive=(not args.cased),
                                                       topk=args.k, method='3CosMul',
                                                       search_solution=args.search_sol)
-        with open(f"analogy_results_k{args.k}.json", 'w') as wf:
-            import json
-            json.dump(scores_ca, wf, ensure_ascii=False, indent=4)
-
         results[eval_file] = {
             'cosAdd': scores_ca[1][:-1],
             'cosMul': scores_cm[1][:-1],
@@ -275,7 +267,6 @@ def evaluateAnalogy(filename, args):
                 'oov_ratio': scores_ca[1][-1]['oov_ratio']
             }
         }
-
 
 def evaluateSimilarity(filename, args):
     """Compute Spearman rank coefficient for each evaluation file"""
